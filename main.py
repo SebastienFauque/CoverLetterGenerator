@@ -27,8 +27,39 @@ class JobDescription(BaseModel):
 
 class AppState:
     def __init__(self):
+        self.data_file = "app_data.json"
         self.resume: Optional[str] = None
         self.save_directory: Optional[str] = None
+        self.load_data()
+    
+    def load_data(self):
+        """Load resume and save directory from persistent storage.
+        
+        Loads data from JSON file if it exists, otherwise uses defaults.
+        """
+        try:
+            if os.path.exists(self.data_file):
+                with open(self.data_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.resume = data.get('resume')
+                    self.save_directory = data.get('save_directory')
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Warning: Could not load app data: {e}")
+    
+    def save_data(self):
+        """Save current resume and save directory to persistent storage.
+        
+        Saves data to JSON file for persistence between sessions.
+        """
+        try:
+            data = {
+                'resume': self.resume,
+                'save_directory': self.save_directory
+            }
+            with open(self.data_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except IOError as e:
+            print(f"Warning: Could not save app data: {e}")
 
 app_state = AppState()
 
@@ -64,6 +95,7 @@ async def set_resume(resume_data: ResumeData):
         dict: Success message and content length.
     """
     app_state.resume = resume_data.content
+    app_state.save_data()
     return {"message": "Resume saved successfully", "length": len(resume_data.content)}
 
 @app.post("/resume-file")
@@ -84,6 +116,7 @@ async def set_resume_file(file: UploadFile = File(...)):
     
     content = await file.read()
     app_state.resume = content.decode('utf-8')
+    app_state.save_data()
     return {"message": f"Resume file '{file.filename}' processed successfully", "length": len(app_state.resume)}
 
 @app.post("/save-location")
@@ -106,6 +139,7 @@ async def set_save_location(location: SaveLocation):
         raise HTTPException(status_code=400, detail="Path is not a directory")
     
     app_state.save_directory = location.directory_path
+    app_state.save_data()
     return {"message": f"Save location set to: {location.directory_path}"}
 
 def generate_filename(company_name: str, job_title: str, job_id: Optional[str] = None) -> str:

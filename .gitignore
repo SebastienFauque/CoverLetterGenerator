@@ -83,3 +83,6 @@ dmypy.json
 # Virtual environments
 env/
 venv/
+
+# App data persistence
+app_data.json
