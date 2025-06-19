@@ -1,5 +1,7 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, field_validator
 from typing import Optional
 import os
 import re
@@ -11,10 +13,32 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_LEFT
 from pydantic_ai import Agent
 from dotenv import load_dotenv
+import PyPDF2
+import io
 
 load_dotenv()
 
 app = FastAPI(title="Cover Letter Generator", description="Generate personalized cover letters from job descriptions and resumes")
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle JSON validation errors with helpful messages.
+    
+    Args:
+        request (Request): The request that caused the error.
+        exc (RequestValidationError): The validation exception.
+        
+    Returns:
+        JSONResponse: User-friendly error message.
+    """
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "Invalid input format",
+            "message": "Please ensure your job description text doesn't contain special control characters. Try copying and pasting into a plain text editor first, then copy from there.",
+            "details": str(exc.errors())
+        }
+    )
 
 class ResumeData(BaseModel):
     content: str
@@ -24,6 +48,30 @@ class SaveLocation(BaseModel):
 
 class JobDescription(BaseModel):
     content: str
+    
+    @field_validator('content')
+    @classmethod
+    def sanitize_content(cls, v: str) -> str:
+        """Remove or replace problematic control characters from job description text.
+        
+        Args:
+            v (str): Input job description text.
+            
+        Returns:
+            str: Sanitized text safe for JSON processing.
+        """
+        import unicodedata
+        
+        # Remove control characters except newlines, tabs, and carriage returns
+        sanitized = ''.join(char for char in v if unicodedata.category(char)[0] != 'C' or char in '\n\r\t')
+        
+        # Replace problematic characters
+        sanitized = sanitized.replace('\x00', '')  # Remove null bytes
+        sanitized = sanitized.replace('\b', '')    # Remove backspace
+        sanitized = sanitized.replace('\f', '')    # Remove form feed
+        sanitized = sanitized.replace('\v', '')    # Remove vertical tab
+        
+        return sanitized
 
 class AppState:
     def __init__(self):
@@ -103,21 +151,30 @@ async def set_resume_file(file: UploadFile = File(...)):
     """Set resume content from uploaded file.
     
     Args:
-        file (UploadFile): Text or markdown file containing resume content.
+        file (UploadFile): Text, markdown, or PDF file containing resume content.
         
     Returns:
         dict: Success message and content length.
         
     Raises:
-        HTTPException: If file format is not supported.
+        HTTPException: If file format is not supported or processing fails.
     """
-    if not file.filename.endswith(('.txt', '.md')):
-        raise HTTPException(status_code=400, detail="Only .txt and .md files are supported")
+    if not file.filename.endswith(('.txt', '.md', '.pdf')):
+        raise HTTPException(status_code=400, detail="Only .txt, .md, and .pdf files are supported")
     
-    content = await file.read()
-    app_state.resume = content.decode('utf-8')
-    app_state.save_data()
-    return {"message": f"Resume file '{file.filename}' processed successfully", "length": len(app_state.resume)}
+    try:
+        content = await file.read()
+        
+        if file.filename.endswith('.pdf'):
+            app_state.resume = extract_text_from_pdf(content)
+        else:
+            app_state.resume = content.decode('utf-8')
+        
+        app_state.save_data()
+        return {"message": f"Resume file '{file.filename}' processed successfully", "length": len(app_state.resume)}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
 
 @app.post("/save-location")
 async def set_save_location(location: SaveLocation):
@@ -195,6 +252,117 @@ def create_pdf(content: str, filepath: str):
     
     doc.build(story)
 
+def extract_text_from_pdf(pdf_content: bytes) -> str:
+    """Extract text content from PDF file.
+    
+    Args:
+        pdf_content (bytes): PDF file content as bytes.
+        
+    Returns:
+        str: Extracted text content from the PDF.
+        
+    Raises:
+        Exception: If PDF processing fails.
+    """
+    try:
+        pdf_stream = io.BytesIO(pdf_content)
+        pdf_reader = PyPDF2.PdfReader(pdf_stream)
+        
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+        
+        return text.strip()
+    except Exception as e:
+        raise Exception(f"Failed to extract text from PDF: {str(e)}")
+
+@app.post("/generate-cover-letter-text")
+async def generate_cover_letter_text(job_description: str):
+    """Generate cover letter from job description text string.
+    
+    Args:
+        job_description (str): Job description text as a simple string parameter.
+        
+    Returns:
+        dict: Success message with filename, filepath, and extracted job info.
+        
+    Raises:
+        HTTPException: If resume or save location not set, or generation fails.
+    """
+    if not app_state.resume:
+        raise HTTPException(status_code=400, detail="Resume not set. Use /resume or /resume-file endpoint first.")
+    
+    if not app_state.save_directory:
+        raise HTTPException(status_code=400, detail="Save location not set. Use /save-location endpoint first.")
+    
+    if not job_description or not job_description.strip():
+        raise HTTPException(status_code=400, detail="Job description cannot be empty.")
+    
+    try:
+        # Sanitize the text
+        import unicodedata
+        sanitized = ''.join(char for char in job_description if unicodedata.category(char)[0] != 'C' or char in '\n\r\t')
+        sanitized = sanitized.replace('\x00', '').replace('\b', '').replace('\f', '').replace('\v', '')
+        
+        return await _process_cover_letter(sanitized)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating cover letter: {str(e)}")
+
+async def _process_cover_letter(job_description_text: str):
+    """Process cover letter generation with job description text.
+    
+    Args:
+        job_description_text (str): Sanitized job description text.
+        
+    Returns:
+        dict: Success message with filename, filepath, and extracted job info.
+    """
+    prompt = f"""
+    Resume:
+    {app_state.resume}
+    
+    Job Description:
+    {job_description_text}
+    
+    Create a personalized cover letter for this job application.
+    """
+    
+    result = await agent.run(prompt)
+    response_text = str(result.data)
+    
+    if "JSON_DATA:" in response_text:
+        cover_letter_text = response_text.split("JSON_DATA:")[0].strip()
+        json_part = response_text.split("JSON_DATA:")[1].strip()
+        try:
+            job_info = json.loads(json_part)
+            company_name = job_info.get("company_name", "Unknown_Company")
+            job_title = job_info.get("job_title", "Position")
+            job_id = job_info.get("job_id")
+        except json.JSONDecodeError:
+            company_name = "Unknown_Company"
+            job_title = "Position"
+            job_id = None
+    else:
+        cover_letter_text = response_text
+        company_name = "Unknown_Company"
+        job_title = "Position"
+        job_id = None
+    
+    filename = generate_filename(company_name, job_title, job_id)
+    filepath = os.path.join(app_state.save_directory, filename)
+    
+    create_pdf(cover_letter_text, filepath)
+    
+    return {
+        "message": "Cover letter generated and saved successfully",
+        "filename": filename,
+        "filepath": filepath,
+        "company": company_name,
+        "job_title": job_title,
+        "job_id": job_id
+    }
+
 @app.post("/generate-cover-letter")
 async def generate_cover_letter(job_desc: JobDescription):
     """Generate cover letter from job description using stored resume and save to specified location.
@@ -215,50 +383,7 @@ async def generate_cover_letter(job_desc: JobDescription):
         raise HTTPException(status_code=400, detail="Save location not set. Use /save-location endpoint first.")
     
     try:
-        prompt = f"""
-        Resume:
-        {app_state.resume}
-        
-        Job Description:
-        {job_desc.content}
-        
-        Create a personalized cover letter for this job application.
-        """
-        
-        result = await agent.run(prompt)
-        response_text = str(result.data)
-        
-        if "JSON_DATA:" in response_text:
-            cover_letter_text = response_text.split("JSON_DATA:")[0].strip()
-            json_part = response_text.split("JSON_DATA:")[1].strip()
-            try:
-                job_info = json.loads(json_part)
-                company_name = job_info.get("company_name", "Unknown_Company")
-                job_title = job_info.get("job_title", "Position")
-                job_id = job_info.get("job_id")
-            except json.JSONDecodeError:
-                company_name = "Unknown_Company"
-                job_title = "Position"
-                job_id = None
-        else:
-            cover_letter_text = response_text
-            company_name = "Unknown_Company"
-            job_title = "Position"
-            job_id = None
-        
-        filename = generate_filename(company_name, job_title, job_id)
-        filepath = os.path.join(app_state.save_directory, filename)
-        
-        create_pdf(cover_letter_text, filepath)
-        
-        return {
-            "message": "Cover letter generated and saved successfully",
-            "filename": filename,
-            "filepath": filepath,
-            "company": company_name,
-            "job_title": job_title,
-            "job_id": job_id
-        }
+        return await _process_cover_letter(job_desc.content)
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating cover letter: {str(e)}")
