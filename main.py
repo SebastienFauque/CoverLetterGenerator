@@ -55,13 +55,30 @@ agent = Agent(
 
 @app.post("/resume")
 async def set_resume(resume_data: ResumeData):
-    """Set resume content as string"""
+    """Set resume content as string.
+    
+    Args:
+        resume_data (ResumeData): Resume content to store.
+        
+    Returns:
+        dict: Success message and content length.
+    """
     app_state.resume = resume_data.content
     return {"message": "Resume saved successfully", "length": len(resume_data.content)}
 
 @app.post("/resume-file")
 async def set_resume_file(file: UploadFile = File(...)):
-    """Set resume content from uploaded file"""
+    """Set resume content from uploaded file.
+    
+    Args:
+        file (UploadFile): Text or markdown file containing resume content.
+        
+    Returns:
+        dict: Success message and content length.
+        
+    Raises:
+        HTTPException: If file format is not supported.
+    """
     if not file.filename.endswith(('.txt', '.md')):
         raise HTTPException(status_code=400, detail="Only .txt and .md files are supported")
     
@@ -71,7 +88,17 @@ async def set_resume_file(file: UploadFile = File(...)):
 
 @app.post("/save-location")
 async def set_save_location(location: SaveLocation):
-    """Set directory where cover letters will be saved"""
+    """Set directory where cover letters will be saved.
+    
+    Args:
+        location (SaveLocation): Directory path for saving PDFs.
+        
+    Returns:
+        dict: Success message with directory path.
+        
+    Raises:
+        HTTPException: If directory doesn't exist or is not a directory.
+    """
     path = Path(location.directory_path)
     if not path.exists():
         raise HTTPException(status_code=400, detail="Directory does not exist")
@@ -82,7 +109,16 @@ async def set_save_location(location: SaveLocation):
     return {"message": f"Save location set to: {location.directory_path}"}
 
 def generate_filename(company_name: str, job_title: str, job_id: Optional[str] = None) -> str:
-    """Generate filename based on company, job title, and optional job ID"""
+    """Generate filename based on company, job title, and optional job ID.
+    
+    Args:
+        company_name (str): Name of the company.
+        job_title (str): Job title for the position.
+        job_id (Optional[str]): Optional job ID or reference number.
+        
+    Returns:
+        str: Generated filename in format 'company_jobtitle_jobid.pdf'.
+    """
     company_clean = re.sub(r'[^\w\s-]', '', company_name).strip()
     company_clean = re.sub(r'[-\s]+', '_', company_clean)
     
@@ -97,7 +133,12 @@ def generate_filename(company_name: str, job_title: str, job_id: Optional[str] =
     return '_'.join(filename_parts) + '.pdf'
 
 def create_pdf(content: str, filepath: str):
-    """Create PDF from cover letter content"""
+    """Create PDF from cover letter content.
+    
+    Args:
+        content (str): Cover letter text content.
+        filepath (str): Full path where PDF will be saved.
+    """
     doc = SimpleDocTemplate(filepath, pagesize=letter)
     styles = getSampleStyleSheet()
     
@@ -122,7 +163,17 @@ def create_pdf(content: str, filepath: str):
 
 @app.post("/generate-cover-letter")
 async def generate_cover_letter(job_desc: JobDescription):
-    """Generate cover letter from job description using stored resume and save to specified location"""
+    """Generate cover letter from job description using stored resume and save to specified location.
+    
+    Args:
+        job_desc (JobDescription): Job description content.
+        
+    Returns:
+        dict: Success message with filename, filepath, and extracted job info.
+        
+    Raises:
+        HTTPException: If resume or save location not set, or generation fails.
+    """
     if not app_state.resume:
         raise HTTPException(status_code=400, detail="Resume not set. Use /resume or /resume-file endpoint first.")
     
@@ -180,7 +231,11 @@ async def generate_cover_letter(job_desc: JobDescription):
 
 @app.get("/status")
 async def get_status():
-    """Get current application status"""
+    """Get current application status.
+    
+    Returns:
+        dict: Status information including resume and save directory state.
+    """
     return {
         "resume_set": app_state.resume is not None,
         "resume_length": len(app_state.resume) if app_state.resume else 0,
